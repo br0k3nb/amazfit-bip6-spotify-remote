@@ -1,0 +1,18 @@
+{
+  "name": "spotify-control-bip6",
+  "version": "1.5.0",
+  "description": "Spotify playback controls for Amazfit Bip 6",
+  "main": "app.js",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "zeus build"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@zeppos/device-types": "^3.0.0"
+  },
+  "dependencies": {
+    "@zeppos/zml": "^0.0.38"
+  }
+}
