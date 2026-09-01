@@ -153,7 +153,7 @@ async function spotifyFetch(side, path, options = {}) {
       setItem(side, RECONNECT_SETTING, '1')
       const feature = path.indexOf('/me/playlists') === 0
         ? 'playlist access'
-        : path.indexOf('/me/tracks') === 0
+        : path.indexOf('/me/tracks') === 0 || path.indexOf('/me/library') === 0
           ? 'Liked Songs access'
           : 'the required permission'
       throw new Error(`Spotify login is missing ${feature}. In Zepp, open Spotify Control settings, tap Clear login, then Prepare and Login again.`)
@@ -237,6 +237,10 @@ function transferFile(side, path, params) {
 }
 
 async function prepareAndTransferArt(side, url, albumId) {
+  if (side._artJob && side._artJob.albumId === albumId && side._artJob.url === url) {
+    return side._artJob.promise
+  }
+
   const previous = side._artQueue || Promise.resolve()
   const current = previous.catch(() => {}).then(async () => {
     let convertedPath = side._artAlbum === albumId ? side._artPath : ''
@@ -255,10 +259,12 @@ async function prepareAndTransferArt(side, url, albumId) {
   })
 
   side._artQueue = current
+  side._artJob = { albumId, url, promise: current }
   try {
     return await current
   } finally {
     if (side._artQueue === current) side._artQueue = null
+    if (side._artJob && side._artJob.promise === current) side._artJob = null
   }
 }
 
@@ -288,20 +294,79 @@ async function prepareAndTransferThumbnail(side, url, albumId, slot) {
   return { transferred: true, albumId, slot: safeSlot }
 }
 
-function findThumbnail(images) {
+function findImageNearWidth(images, targetWidth) {
   if (!Array.isArray(images)) return null
   let selected = null
   let bestDistance = Number.POSITIVE_INFINITY
   images.forEach((image) => {
     if (!image || !image.url) return
     const width = Number(image.width || 0)
-    const distance = width > 0 ? Math.abs(width - 64) : 10000
+    const distance = width > 0 ? Math.abs(width - targetWidth) : 10000
     if (distance < bestDistance) {
       selected = image
       bestDistance = distance
     }
   })
   return selected
+}
+
+function findThumbnail(images) {
+  return findImageNearWidth(images, 64)
+}
+
+function findCoverImage(images) {
+  return findImageNearWidth(images, 300)
+}
+
+function compactPlaybackState(state) {
+  const source = state || {}
+  const item = source.item
+  const result = {
+    is_playing: !!source.is_playing,
+    progress_ms: Number(source.progress_ms || 0),
+    device: source.device && source.device.name
+      ? { name: source.device.name }
+      : null,
+    item: null,
+  }
+
+  if (!item) return result
+
+  const album = item.album || {}
+  const artwork = findCoverImage(album.images)
+  result.item = {
+    id: item.id || '',
+    uri: item.uri || '',
+    type: item.type || 'track',
+    name: item.name || 'Unknown track',
+    duration_ms: Number(item.duration_ms || 0),
+    artists: Array.isArray(item.artists)
+      ? item.artists.map((artist) => ({ name: (artist && artist.name) || '' })).filter((artist) => artist.name)
+      : [],
+    album: album.id && artwork
+      ? { id: album.id, images: [artwork] }
+      : null,
+  }
+  return result
+}
+
+function preloadCurrentArtwork(side, item) {
+  const album = item && item.album
+  const albumId = (album && album.id) || ''
+  const image = findCoverImage(album && album.images)
+  if (!albumId || !image || !image.url) return
+
+  prepareAndTransferArt(side, image.url, albumId).catch((error) => {
+    console.log('[Side] cover preload failed', error && (error.message || String(error)))
+  })
+}
+
+function requireTrackUri(value) {
+  const uri = String(value || '').trim()
+  if (!/^spotify:track:[A-Za-z0-9]+$/.test(uri)) {
+    throw new Error('The current item is not a Spotify song that can be liked.')
+  }
+  return uri
 }
 
 function compactTrack(track) {
@@ -395,16 +460,16 @@ AppSideService(
 
         if (action === 'getState') {
           const state = await spotifyFetch(this, '/me/player')
-          if (state.item) return { data: state }
+          if (state.item) {
+            preloadCurrentArtwork(this, state.item)
+            return { data: compactPlaybackState(state) }
+          }
 
           const current = await spotifyFetch(this, '/me/player/currently-playing')
-          if (!current.item) return { data: state }
-          return {
-            data: {
-              ...current,
-              device: state.device || null,
-            },
-          }
+          if (!current.item) return { data: compactPlaybackState(state) }
+          const combined = { ...current, device: state.device || null }
+          preloadCurrentArtwork(this, current.item)
+          return { data: compactPlaybackState(combined) }
         }
 
         if (action === 'toggle') {
@@ -440,6 +505,21 @@ AppSideService(
           const body = await spotifyFetch(this, '/me/tracks?limit=30')
           const items = (body.items || []).map((entry) => entry && entry.track).filter((track) => track && track.uri).map(compactTrack)
           return { items }
+        }
+
+        if (action === 'getLikeState') {
+          const uri = requireTrackUri(params.uri)
+          const body = await spotifyFetch(this, `/me/library/contains?uris=${encodeURIComponent(uri)}`)
+          return { uri, liked: Array.isArray(body) && body[0] === true }
+        }
+
+        if (action === 'setLiked') {
+          const uri = requireTrackUri(params.uri)
+          const liked = params.liked === true
+          await spotifyFetch(this, `/me/library?uris=${encodeURIComponent(uri)}`, {
+            method: liked ? 'PUT' : 'DELETE',
+          })
+          return { uri, liked }
         }
 
         if (action === 'getQueue') {

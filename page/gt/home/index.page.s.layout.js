@@ -55,6 +55,21 @@ export const ART_FRAME_STYLE = {
   radius: px(14),
 }
 
+const LIKE_BUTTON_SIZE = px(54)
+
+export const BTN_LIKE_STYLE = {
+  text: '♡',
+  x: ART_FRAME_X + ART_FRAME_SIZE + px(16),
+  y: ART_FRAME_STYLE.y + Math.round((ART_FRAME_SIZE - LIKE_BUTTON_SIZE) / 2),
+  w: LIKE_BUTTON_SIZE,
+  h: LIKE_BUTTON_SIZE,
+  radius: Math.round(LIKE_BUTTON_SIZE / 2),
+  normal_color: 0x202020,
+  press_color: 0x383838,
+  color: 0x707070,
+  text_size: px(31),
+}
+
 export const ART_STYLE = {
   x: ART_FRAME_X + px(5),
   y: px(47),

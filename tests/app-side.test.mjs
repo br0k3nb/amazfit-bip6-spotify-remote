@@ -81,6 +81,40 @@ test('transport controls call the documented Spotify player endpoints', async ()
   )
 })
 
+test('the current song can be liked and unliked with Spotify library endpoints', async () => {
+  const harness = await createHarness(async (request) => {
+    if (request.url.includes('/me/library/contains?')) {
+      return { status: 200, body: [false] }
+    }
+    return { status: 200, body: '' }
+  })
+  const uri = 'spotify:track:4iV5W9uYEdYUVa79Axb7Rh'
+
+  const initial = await harness.request('getLikeState', { uri })
+  const liked = await harness.request('setLiked', { uri, liked: true })
+  const unliked = await harness.request('setLiked', { uri, liked: false })
+
+  assert.equal(initial.liked, false)
+  assert.equal(liked.liked, true)
+  assert.equal(unliked.liked, false)
+  assert.deepEqual(
+    harness.calls.map(({ url, method }) => [url, method]),
+    [
+      ['https://api.spotify.com/v1/me/library/contains?uris=spotify%3Atrack%3A4iV5W9uYEdYUVa79Axb7Rh', 'GET'],
+      ['https://api.spotify.com/v1/me/library?uris=spotify%3Atrack%3A4iV5W9uYEdYUVa79Axb7Rh', 'PUT'],
+      ['https://api.spotify.com/v1/me/library?uris=spotify%3Atrack%3A4iV5W9uYEdYUVa79Axb7Rh', 'DELETE'],
+    ],
+  )
+
+  const invalid = await harness.request('setLiked', {
+    uri: 'spotify:episode:not-a-song',
+    liked: true,
+  })
+  assert.equal(invalid.success, false)
+  assert.match(invalid.error, /not a Spotify song/i)
+  assert.equal(harness.calls.length, 3)
+})
+
 test('queue can be viewed and changed by adding a Spotify item', async () => {
   const harness = await createHarness(async (request) => {
     if (request.url.endsWith('/me/player/queue')) {
@@ -333,6 +367,79 @@ test('album art uses explicit data paths and reports transfer completion', async
   })
 })
 
+test('playback state is compact and starts transferring the watch-sized cover immediately', async () => {
+  const harness = await createHarness(async (request) => ({
+    status: 200,
+    body: {
+      is_playing: true,
+      progress_ms: 12000,
+      device: { name: 'Phone', volume_percent: 70, unnecessary: 'discard me' },
+      item: {
+        id: 'track-1',
+        uri: 'spotify:track:4iV5W9uYEdYUVa79Axb7Rh',
+        type: 'track',
+        name: 'Fast Cover',
+        duration_ms: 180000,
+        artists: [{ name: 'Artist', href: 'discard me' }],
+        available_markets: new Array(100).fill('BR'),
+        album: {
+          id: 'album-fast',
+          images: [
+            { width: 640, height: 640, url: 'https://i.scdn.co/large.jpg' },
+            { width: 300, height: 300, url: 'https://i.scdn.co/medium.jpg' },
+            { width: 64, height: 64, url: 'https://i.scdn.co/small.jpg' },
+          ],
+        },
+      },
+    },
+  }))
+  let downloadedUrl = ''
+  let transferOptions
+
+  harness.side.download = (url, options) => {
+    downloadedUrl = url
+    const task = {}
+    queueMicrotask(() => task.onSuccess({ filePath: options.filePath, statusCode: 200 }))
+    return task
+  }
+  harness.side.convert = async (options) => ({ targetFilePath: options.targetFilePath })
+  harness.side.sendFile = (path, options) => {
+    transferOptions = { path, options }
+    return {
+      readyState: 'pending',
+      on(event, callback) {
+        if (event === 'change') queueMicrotask(() => callback({ data: { readyState: 'transferred' } }))
+      },
+    }
+  }
+
+  const response = await harness.request('getState')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.equal(downloadedUrl, 'https://i.scdn.co/medium.jpg')
+  assert.deepEqual(JSON.parse(JSON.stringify(response.data)), {
+    is_playing: true,
+    progress_ms: 12000,
+    device: { name: 'Phone' },
+    item: {
+      id: 'track-1',
+      uri: 'spotify:track:4iV5W9uYEdYUVa79Axb7Rh',
+      type: 'track',
+      name: 'Fast Cover',
+      duration_ms: 180000,
+      artists: [{ name: 'Artist' }],
+      album: {
+        id: 'album-fast',
+        images: [{ width: 300, height: 300, url: 'https://i.scdn.co/medium.jpg' }],
+      },
+    },
+  })
+  assert.deepEqual(JSON.parse(JSON.stringify(transferOptions)), {
+    path: 'data://download/spotify_cover.png',
+    options: { kind: 'spotify-cover', albumId: 'album-fast' },
+  })
+})
+
 test('watch source uses valid scroll, queue, filter, artwork, native phone volume, icon, and OAuth contracts', async () => {
   const [home, homeLayout, playlists, playlistLayout, tracks, cover, queue, queueLayout, settingsPage, icon, manifestText] = await Promise.all([
     readFile(new URL('../page/gt/home/index.page.js', import.meta.url), 'utf8'),
@@ -360,6 +467,8 @@ test('watch source uses valid scroll, queue, filter, artwork, native phone volum
   assert.match(home, /launchApp\(\{/)
   assert.match(home, /native: true/)
   assert.match(home, /page\/gt\/queue\/index\.page/)
+  assert.match(home, /spotify\.getLikeState/)
+  assert.match(home, /spotify\.setLiked/)
   assert.doesNotMatch(home, /page\/gt\/sound\/index\.page/)
   assert.match(homeLayout, /scroll_enable: 1/)
   assert.match(homeLayout, /DEVICE_HEIGHT \+ px\(64\)/)
@@ -388,13 +497,16 @@ test('watch source uses valid scroll, queue, filter, artwork, native phone volum
   assert.match(queueLayout, /Add works with Premium\./)
   assert.match(homeLayout, /text: 'Volume'/)
   assert.match(homeLayout, /text: 'Queue'/)
+  assert.match(homeLayout, /text: '♡'/)
+  assert.match(home, /liked \? '♥' : '♡'/)
   assert.match(settingsPage, /playlist-read-private/)
   assert.match(settingsPage, /playlist-read-collaborative/)
   assert.match(settingsPage, /user-read-private/)
+  assert.match(settingsPage, /user-library-modify/)
   assert.match(settingsPage, /spotifyNeedsReconnect/)
   assert.ok(icon.length > 1000)
   assert.equal(manifest.app.icon, 'icon.png')
-  assert.equal(manifest.app.version.name, '1.5.0')
+  assert.equal(manifest.app.version.name, '1.6.0')
   assert.equal(manifest.targets.gt.designWidth, 390)
   assert.deepEqual(manifest.targets.gt.platforms, [{ st: 's' }])
   assert.ok(manifest.targets.gt.module.page.pages.includes('page/gt/cover/index.page'))

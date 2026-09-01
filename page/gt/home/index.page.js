@@ -15,6 +15,7 @@ import {
   PROG_FG_STYLE,
   TIME_L_STYLE,
   TIME_R_STYLE,
+  BTN_LIKE_STYLE,
   BTN_PREV_STYLE,
   BTN_PLAY_STYLE,
   BTN_NEXT_STYLE,
@@ -41,6 +42,20 @@ function errorMessage(error) {
   return String((error && error.message) || error || 'Unknown error')
 }
 
+function parseFileParams(params) {
+  if (params && typeof params === 'object') return params
+  if (typeof params !== 'string') return {}
+  try {
+    return JSON.parse(params) || {}
+  } catch (error) {
+    return {}
+  }
+}
+
+function isLikeableTrack(uri) {
+  return /^spotify:track:[A-Za-z0-9]+$/.test(String(uri || ''))
+}
+
 Page(
   BasePage({
     state: {
@@ -49,6 +64,10 @@ Page(
       loaded: false,
       busy: false,
       isPlaying: false,
+      currentTrackUri: '',
+      liked: false,
+      likeKnown: false,
+      likeBusy: false,
       wantedAlbum: '',
       requestedAlbum: '',
       displayedAlbum: '',
@@ -59,13 +78,19 @@ Page(
       this.state.built = false
       this.state.loaded = false
       this.state.busy = false
+      this.state.currentTrackUri = ''
+      this.state.liked = false
+      this.state.likeKnown = false
+      this.state.likeBusy = false
       this.state.wantedAlbum = ''
       this.state.requestedAlbum = ''
       this.state.displayedAlbum = ''
       this._generation = Number(this._generation || 0) + 1
       this._requestSequence = 0
+      this._likeSequence = 0
       this._refreshTimer = null
       this._coverPath = 'image/art_placeholder.png'
+      this._pendingCovers = {}
     },
 
     build() {
@@ -77,6 +102,11 @@ Page(
         createWidget(hmUI.widget.FILL_RECT, BG_STYLE)
         createWidget(hmUI.widget.CIRCLE, HEADER_DOT_STYLE)
         createWidget(hmUI.widget.TEXT, HEADER_STYLE)
+        this.likeButton = createWidget(hmUI.widget.BUTTON, {
+          ...BTN_LIKE_STYLE,
+          click_func: () => this.handleLike(),
+        })
+        this.updateLikeButton()
         createWidget(hmUI.widget.FILL_RECT, ART_FRAME_STYLE)
 
         this.artWidget = createWidget(hmUI.widget.IMG, ART_STYLE)
@@ -166,20 +196,14 @@ Page(
 
       const applyCover = () => {
         if (!this.state.alive || generation !== this._generation || !this.artWidget || !file.filePath) return
-        const params = file.params || {}
+        const params = parseFileParams(file.params)
         if (params.kind && params.kind !== 'spotify-cover') return
-        if (params.albumId && params.albumId !== this.state.wantedAlbum) return
-
-        try {
-          this.artWidget.setProperty(hmUI.prop.MORE, {
-            ...ART_STYLE,
-            src: file.filePath,
-          })
-          this._coverPath = file.filePath
-          this.state.displayedAlbum = params.albumId || this.state.wantedAlbum
-        } catch (error) {
-          logger.error('cover display failed ' + errorMessage(error))
+        const albumId = params.albumId || ''
+        if (albumId && albumId !== this.state.wantedAlbum) {
+          this._pendingCovers[albumId] = file.filePath
+          return
         }
+        this.applyCover(file.filePath, albumId)
       }
 
       try {
@@ -194,6 +218,28 @@ Page(
         })
       } catch (error) {
         logger.error('cover receive failed ' + errorMessage(error))
+      }
+    },
+
+    applyCover(path, albumId) {
+      if (!this.state.alive || !this.artWidget || !path) return false
+      if (albumId && albumId !== this.state.wantedAlbum) {
+        this._pendingCovers[albumId] = path
+        return false
+      }
+
+      try {
+        this.artWidget.setProperty(hmUI.prop.MORE, {
+          ...ART_STYLE,
+          src: path,
+        })
+        this._coverPath = path
+        this.state.displayedAlbum = albumId || this.state.wantedAlbum
+        if (albumId) delete this._pendingCovers[albumId]
+        return true
+      } catch (error) {
+        logger.error('cover display failed ' + errorMessage(error))
+        return false
       }
     },
 
@@ -221,12 +267,128 @@ Page(
       )
     },
 
+    updateLikeButton() {
+      if (!this.state.alive || !this.likeButton) return
+      const available = isLikeableTrack(this.state.currentTrackUri)
+      const liked = available && this.state.liked
+      const busy = available && this.state.likeBusy
+
+      this.likeButton.setProperty(hmUI.prop.MORE, {
+        ...BTN_LIKE_STYLE,
+        text: busy ? '…' : liked ? '♥' : '♡',
+        normal_color: 0x202020,
+        press_color: 0x383838,
+        color: liked ? 0x1ed760 : available ? 0xffffff : 0x707070,
+      })
+      this.likeButton.setEnable(available && !busy && !this.state.busy)
+    },
+
+    requestLikeState(uri) {
+      const trackUri = isLikeableTrack(uri) ? String(uri) : ''
+      const changed = trackUri !== this.state.currentTrackUri
+      this.state.currentTrackUri = trackUri
+
+      if (changed || !trackUri) {
+        this.state.liked = false
+        this.state.likeKnown = false
+        this.state.likeBusy = false
+      }
+
+      if (trackUri && this.state.likeBusy && !changed) {
+        this.updateLikeButton()
+        return
+      }
+
+      const sequence = ++this._likeSequence
+      this.updateLikeButton()
+      if (!trackUri || typeof this.request !== 'function') return
+
+      const generation = this._generation
+      this.request({ method: 'spotify.getLikeState', params: { uri: trackUri } })
+        .then((response) => {
+          if (
+            !this.state.alive
+            || generation !== this._generation
+            || sequence !== this._likeSequence
+            || trackUri !== this.state.currentTrackUri
+          ) return
+
+          if (!response || response.success === false) {
+            this.state.likeKnown = false
+            this.updateLikeButton()
+            logger.error('like status failed ' + errorMessage(response && response.error))
+            return
+          }
+
+          this.state.liked = response.liked === true
+          this.state.likeKnown = true
+          this.updateLikeButton()
+        })
+        .catch((error) => {
+          if (generation !== this._generation || sequence !== this._likeSequence) return
+          this.state.likeKnown = false
+          this.updateLikeButton()
+          logger.error('like status failed ' + errorMessage(error))
+        })
+    },
+
+    handleLike() {
+      const uri = this.state.currentTrackUri
+      if (!this.state.alive || this.state.busy || this.state.likeBusy || !isLikeableTrack(uri)) return
+
+      const generation = this._generation
+      const sequence = ++this._likeSequence
+      const previousLiked = this.state.liked
+      const wantedLiked = !previousLiked
+      this.state.liked = wantedLiked
+      this.state.likeKnown = true
+      this.state.likeBusy = true
+      this.updateLikeButton()
+
+      const fail = (error) => {
+        if (
+          !this.state.alive
+          || generation !== this._generation
+          || sequence !== this._likeSequence
+          || uri !== this.state.currentTrackUri
+        ) return
+        this.state.liked = previousLiked
+        this.state.likeKnown = true
+        this.state.likeBusy = false
+        this.updateLikeButton()
+        if (this.artistWidget) {
+          this.artistWidget.setProperty(hmUI.prop.TEXT, `Like failed: ${errorMessage(error).substring(0, 64)}`)
+        }
+      }
+
+      this.request({
+        method: 'spotify.setLiked',
+        params: { uri, liked: wantedLiked },
+      }).then((response) => {
+        if (
+          !this.state.alive
+          || generation !== this._generation
+          || sequence !== this._likeSequence
+          || uri !== this.state.currentTrackUri
+        ) return
+        if (!response || response.success === false) {
+          fail((response && response.error) || 'Could not update Liked Songs')
+          return
+        }
+        this.state.liked = response.liked === true
+        this.state.likeKnown = true
+        this.state.likeBusy = false
+        this.updateLikeButton()
+      }).catch(fail)
+    },
+
     showError(message) {
       if (!this.state.alive || !this.titleWidget || !this.artistWidget) return
       const text = errorMessage(message)
       this.titleWidget.setProperty(hmUI.prop.TEXT, text.indexOf('logged in') >= 0 ? 'Login required' : 'Could not connect')
       this.artistWidget.setProperty(hmUI.prop.TEXT, text.substring(0, 90))
       this.setPlaying(false)
+      this.requestLikeState('')
     },
 
     showPlaceholder() {
@@ -291,7 +453,14 @@ Page(
       if (!image || !image.url) return
 
       this.state.wantedAlbum = albumId
-      if (albumId === this.state.displayedAlbum || albumId === this.state.requestedAlbum) return
+      if (albumId === this.state.displayedAlbum) return
+
+      const pendingPath = this._pendingCovers[albumId]
+      if (pendingPath && this.applyCover(pendingPath, albumId)) {
+        this.state.requestedAlbum = albumId
+        return
+      }
+      if (albumId === this.state.requestedAlbum) return
 
       this.state.requestedAlbum = albumId
       this.state.displayedAlbum = ''
@@ -337,6 +506,7 @@ Page(
             this.artistWidget.setProperty(hmUI.prop.TEXT, 'Start Spotify on your phone')
             this.setProgress(0, 0)
             this.setPlaying(false)
+            this.requestLikeState('')
             this.requestCover(null)
             return
           }
@@ -350,6 +520,7 @@ Page(
           this.artistWidget.setProperty(hmUI.prop.TEXT, `${artists}${deviceName}`)
           this.setPlaying(!!data.is_playing)
           this.setProgress(data.progress_ms, item.duration_ms)
+          this.requestLikeState(item.uri)
           this.requestCover(item)
         })
         .catch((error) => {
@@ -362,6 +533,9 @@ Page(
       if (!this.state.alive || this.state.busy) return
       const generation = this._generation
       this.state.busy = true
+      this.updateLikeButton()
+
+      if (action === 'previous' || action === 'next') this.requestLikeState('')
 
       const pending = action === 'previous'
         ? 'Going back...'
@@ -377,6 +551,7 @@ Page(
           if (!this.state.alive || generation !== this._generation) return
           if (!response || response.success === false) {
             this.state.busy = false
+            this.updateLikeButton()
             this.showError((response && response.error) || 'Command failed')
             return
           }
@@ -389,12 +564,14 @@ Page(
             this._refreshTimer = null
             if (!this.state.alive || generation !== this._generation) return
             this.state.busy = false
+            this.updateLikeButton()
             this.refresh(true)
           }, 700)
         })
         .catch((error) => {
           if (!this.state.alive || generation !== this._generation) return
           this.state.busy = false
+          this.updateLikeButton()
           this.showError(error)
         })
     },
@@ -403,6 +580,8 @@ Page(
       this.state.alive = false
       this._generation = Number(this._generation || 0) + 1
       this._requestSequence += 1
+      this._likeSequence += 1
+      this._pendingCovers = {}
       if (this._refreshTimer) {
         clearTimeout(this._refreshTimer)
         this._refreshTimer = null

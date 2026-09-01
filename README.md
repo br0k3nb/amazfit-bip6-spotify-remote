@@ -7,7 +7,7 @@
 
   [![Zepp OS](https://img.shields.io/badge/Zepp_OS-4.0-111111?style=flat-square)](https://docs.zepp.com/)
   [![Device](https://img.shields.io/badge/Amazfit-Bip_6-1ED760?style=flat-square)](#compatibility)
-  [![Version](https://img.shields.io/badge/version-1.5.0-1ED760?style=flat-square)](package.json)
+  [![Version](https://img.shields.io/badge/version-1.6.0-1ED760?style=flat-square)](package.json)
   [![License](https://img.shields.io/badge/license-ISC-555555?style=flat-square)](package.json)
 </div>
 
@@ -21,8 +21,9 @@ Spotify Remote is a Zepp OS mini app made for the Amazfit Bip 6. It connects to 
 
 | Area | What you can do |
 | --- | --- |
-| Now playing | View the current song, artist, progress, and album artwork |
+| Now playing | View the current song, artist, progress, and quickly preloaded album artwork |
 | Playback | Play/pause and move to the previous or next track |
+| Liking | Like or unlike the current song directly from the Now Playing screen |
 | Album art | Tap the current cover to open it fullscreen |
 | Playlists | Browse up to 50 playlists, search locally, and filter by **All**, **Mine**, or **Spotify** |
 | Liked Songs | Browse up to 30 saved tracks with lightweight cover previews and start playback |
@@ -52,6 +53,8 @@ Authentication uses Spotify OAuth with PKCE. The app never asks for your Spotify
 5. Start Spotify on the phone, then open **Spotify Control** on the watch.
 
 If Spotify reports `insufficient client scope`, open the settings page, tap **Clear login**, and repeat the sign-in flow so the current permissions can be granted.
+
+After updating from a version before 1.6.0, reconnect once so Spotify can grant the new permission used by the Like button.
 
 <details>
   <summary><strong>Using your own Spotify application and callback server</strong></summary>
@@ -92,13 +95,13 @@ app.json    Zepp OS manifest
 
 - Spotify does not provide Web API operations for removing or reordering queue items. The app can view the queue and add new items.
 - Phone volume is controlled by the watch's native Bluetooth Music controller, not by Spotify's API.
-- Artwork is downloaded by the phone-side service and transferred in watch-friendly sizes to reduce memory use.
+- Artwork starts downloading with the playback-state request and is transferred at a lightweight watch-friendly size.
 - The app depends on the phone, Zepp background service, Spotify availability, and the permissions granted to the Spotify application.
 
 ## Development notes
 
 - App ID: `26263`
-- App version: `1.5.0`
+- App version: `1.6.0`
 - Design width: `390`
 - Target profile: `gt.s`
 - Runtime API: Zepp OS `4.0`
